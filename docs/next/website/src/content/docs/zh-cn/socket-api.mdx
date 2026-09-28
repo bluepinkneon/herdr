@@ -145,6 +145,18 @@ CLI 的 `herdr api snapshot` 会把当前 `session.snapshot` 响应输出为 JSO
 
 客户端可以把 `offset_from_bottom == 0` 视为位于底部。
 
+### 短时滚动意图（theBus 分支 0.9.1）
+
+`pane.scroll_intent` 接受 `pane_id`、`terminal_id`、`cols`、`rows`、
+从 0 开始的 `column`/`row`、带符号的 `lines`（非零，绝对值不超过 64），以及
+`expires_at_ms`。同一主机上的桥接程序必须设置 250ms 以内的截止时间。
+服务器会在产生任何效果之前拒绝过期请求、未知字段、过时的终端标识、尺寸不匹配和越界单元格。
+
+服务器将每一行交给原生滚轮处理，根据当前 PTY 模式选择鼠标滚轮、备用屏幕方向键或主机回滚。
+该方法重绘现有观察者，但不会获取控制权、焦点、调整大小的锁或尺寸决定权。
+它不接受按键、原始字节或修饰键标志。客户端必须串行处理并限制待发送意图，
+在输入、切换目标或断开连接时将其丢弃；已发送请求的结果不明确时，不得重试。
+
 ### 窗格图形
 
 窗格图形允许插件在窗格上放置图像数据。该功能默认可用；当服务器设置 `[terminal].kitty_graphics = false` 时，所有窗格图形方法都返回 `feature_disabled`。更改此设置需要重启服务器。调用 `pane.graphics.info` 会返回所连接客户端的单元格像素宽度和高度,但不会创建图形层。`pane.graphics.set` 接受 `data_base64` 中的 `png`、`rgb` 或 `rgba` 数据,`pane.graphics.clear` 删除该图层。

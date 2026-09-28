@@ -86,7 +86,7 @@ jobs:
         run: |
           sudo find /etc/apt/sources.list.d -type f \( -iname '*microsoft*' -o -iname '*azure-cli*' \) -print -delete
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64
+          sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64 qemu-user
 
       - name: Set Linux aarch64 linker
         if: matrix.target == 'aarch64-unknown-linux-musl'
@@ -107,6 +107,11 @@ jobs:
           if nm -u ${{ matrix.name }} 2>/dev/null | grep -E '(__cxa|GLIBCXX|CXXABI|_ZSt)'; then
             echo "error: Linux artifact has unresolved C++ runtime symbols" >&2
             exit 1
+          fi
+          if [ '${{ matrix.target }}' = aarch64-unknown-linux-musl ]; then
+            qemu-aarch64 ./${{ matrix.name }} --version | tee -a BUILD_INFO.txt
+          else
+            ./${{ matrix.name }} --version | tee -a BUILD_INFO.txt
           fi
           {
             echo "commit=$GITHUB_SHA"
@@ -153,13 +158,13 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
           targets: ${{ matrix.target }}
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.15.2
-
-      - name: Install macOS build tools
-        run: brew install cmake ninja
+      - name: Install macOS build tools and patched Zig
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja zig@0.15
+          echo "$(brew --prefix zig@0.15)/bin" >> "$GITHUB_PATH"
+          echo "ZIG_GLOBAL_CACHE_DIR=$GITHUB_WORKSPACE/.zig-cache" >> "$GITHUB_ENV"
+          echo "ZIG_LOCAL_CACHE_DIR=$GITHUB_WORKSPACE/.zig-cache" >> "$GITHUB_ENV"
+          "$(brew --prefix zig@0.15)/bin/zig" version
 
       - name: Remove Zig caches
         run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
@@ -171,6 +176,7 @@ jobs:
         run: |
           cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
           file ${{ matrix.name }} > BUILD_INFO.txt
+          ./${{ matrix.name }} --version | tee -a BUILD_INFO.txt
           {
             echo "commit=$GITHUB_SHA"
             echo "target=${{ matrix.target }}"
