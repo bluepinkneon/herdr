@@ -971,6 +971,19 @@ fn terminal_control_scroll_command_maps_to_attach_scroll() {
 fn forward_clipboard_uses_local_clipboard_path() {
     let _guard = env_lock().lock().unwrap();
     let _ssh = EnvVarGuard::set("SSH_CONNECTION", "1 2 3 4");
+    crate::selection::reset_clipboard_write_dedup();
     assert!(forward_clipboard("dGVzdA=="));
     assert!(!forward_clipboard("not base64"));
+}
+
+#[test]
+fn forward_clipboard_drops_identical_repeat() {
+    let _guard = env_lock().lock().unwrap();
+    let _ssh = EnvVarGuard::set("SSH_CONNECTION", "1 2 3 4");
+    crate::selection::reset_clipboard_write_dedup();
+    // A single copy action can deliver the same OSC 52 payload twice; the
+    // second must not write the clipboard or show a second confirmation.
+    assert!(forward_clipboard("cmVwZWF0ZWQ="));
+    assert!(!forward_clipboard("cmVwZWF0ZWQ="));
+    assert!(forward_clipboard("ZGlmZmVyZW50"));
 }

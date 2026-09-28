@@ -352,20 +352,75 @@ fn should_prefer_osc52() -> bool {
     )
 }
 
+/// Identical clipboard payloads closer together than this are one user copy.
+///
+/// Pane applications can emit the same OSC 52 write more than once for a single
+/// copy action (for example copy-on-select plus an explicit copy), and Herdr's
+/// own selection copy can land next to an application write. Re-writing the
+/// same bytes fills clipboard history with duplicates, so a repeat inside this
+/// window is dropped.
+const DUPLICATE_CLIPBOARD_WRITE_WINDOW: std::time::Duration =
+    std::time::Duration::from_millis(1000);
+
+type ClipboardWriteDedup = std::sync::Mutex<Option<(Vec<u8>, std::time::Instant)>>;
+
+fn last_clipboard_write() -> &'static ClipboardWriteDedup {
+    static LAST: std::sync::OnceLock<ClipboardWriteDedup> = std::sync::OnceLock::new();
+    LAST.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Whether this payload is an immediate repeat of the last clipboard write.
+///
+/// Records the payload when it is accepted so a burst of identical writes
+/// collapses to one without extending the window indefinitely.
+fn is_duplicate_clipboard_write(bytes: &[u8], now: std::time::Instant) -> bool {
+    let mut last = match last_clipboard_write().lock() {
+        Ok(last) => last,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match last.as_mut() {
+        Some((previous, at))
+            if previous == bytes && now.duration_since(*at) <= DUPLICATE_CLIPBOARD_WRITE_WINDOW =>
+        {
+            *at = now;
+            true
+        }
+        _ => {
+            *last = Some((bytes.to_vec(), now));
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_clipboard_write_dedup() {
+    match last_clipboard_write().lock() {
+        Ok(mut last) => *last = None,
+        Err(poisoned) => *poisoned.into_inner() = None,
+    }
+}
+
 /// Write clipboard bytes to the system clipboard via native platform tools or OSC 52.
 ///
 /// OSC 52 format: `ESC ] 52 ; c ; <base64> BEL`
 ///
 /// Some terminals still only honor BEL-terminated OSC 52 writes, so herdr
 /// emits BEL here even though ST works in newer emulators.
-pub fn write_osc52_bytes(bytes: &[u8]) {
+///
+/// Returns false when the write was suppressed as an immediate duplicate of the
+/// previous payload.
+pub fn write_osc52_bytes(bytes: &[u8]) -> bool {
+    if is_duplicate_clipboard_write(bytes, std::time::Instant::now()) {
+        return false;
+    }
     if !should_prefer_osc52() && crate::platform::write_clipboard(bytes) {
-        return;
+        return true;
     }
 
     let sequence = osc52_sequence(bytes);
     let _ = std::io::stdout().write_all(sequence.as_bytes());
     let _ = std::io::stdout().flush();
+    true
 }
 
 #[cfg(test)]
@@ -416,6 +471,35 @@ mod tests {
     #[test]
     fn osc52_sequence_uses_bel_terminator() {
         assert_eq!(osc52_sequence(b"hello"), "\x1b]52;c;aGVsbG8=\x07");
+    }
+
+    #[test]
+    fn identical_clipboard_writes_within_window_are_deduplicated() {
+        reset_clipboard_write_dedup();
+        let base = std::time::Instant::now();
+        assert!(!is_duplicate_clipboard_write(b"hello", base));
+        // A second identical write from the same copy action must be dropped.
+        assert!(is_duplicate_clipboard_write(
+            b"hello",
+            base + std::time::Duration::from_millis(10)
+        ));
+        // A burst keeps collapsing even as each repeat refreshes the window.
+        assert!(is_duplicate_clipboard_write(
+            b"hello",
+            base + std::time::Duration::from_millis(20)
+        ));
+    }
+
+    #[test]
+    fn different_or_late_clipboard_writes_are_kept() {
+        reset_clipboard_write_dedup();
+        let base = std::time::Instant::now();
+        assert!(!is_duplicate_clipboard_write(b"first", base));
+        assert!(!is_duplicate_clipboard_write(b"second", base));
+        assert!(!is_duplicate_clipboard_write(
+            b"second",
+            base + DUPLICATE_CLIPBOARD_WRITE_WINDOW + std::time::Duration::from_millis(1)
+        ));
     }
 
     #[test]
