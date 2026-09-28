@@ -103,7 +103,7 @@ pub(super) fn terminal_attach_mouse_position(
     exact.or_else(|| cell_fallback(column, row))
 }
 
-pub(super) fn apply_terminal_attach_scroll(
+pub(crate) fn apply_terminal_attach_scroll(
     runtime: &crate::terminal::TerminalRuntime,
     source: AttachScrollSource,
     direction: AttachScrollDirection,

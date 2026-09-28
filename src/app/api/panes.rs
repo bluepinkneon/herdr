@@ -11,10 +11,10 @@ use crate::api::schema::{
     PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
     PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
-    PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams,
-    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
-    PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneScrollIntentParams, PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams,
+    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason,
+    PaneSwapResult, PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams,
+    PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -184,6 +184,73 @@ impl App {
             return pane_not_found(id, &params.pane_id);
         };
         encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
+    pub(super) fn handle_pane_scroll_intent(
+        &mut self,
+        id: String,
+        params: PaneScrollIntentParams,
+    ) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or(u128::MAX);
+        let deadline = u128::from(params.expires_at_ms);
+        if deadline <= now || deadline > now.saturating_add(250) {
+            return encode_error(
+                id,
+                "stale_scroll_intent",
+                "scroll intent deadline expired or invalid",
+            );
+        }
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        if pane.terminal_id != params.terminal_id {
+            return encode_error(id, "stale_terminal", "scroll terminal identity changed");
+        }
+        let Some(runtime) =
+            self.state
+                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        if runtime.current_size() != (params.rows, params.cols)
+            || params.column >= params.cols
+            || params.row >= params.rows
+            || params.lines == 0
+            || params.lines.unsigned_abs() > 64
+        {
+            return encode_error(
+                id,
+                "invalid_scroll_intent",
+                "scroll geometry, cell or distance is invalid",
+            );
+        }
+        let direction = if params.lines < 0 {
+            crate::protocol::AttachScrollDirection::Up
+        } else {
+            crate::protocol::AttachScrollDirection::Down
+        };
+        // One native wheel step per measured row. The existing wheel router
+        // emits one mouse/alternate-scroll event regardless of its line count.
+        for _ in 0..params.lines.unsigned_abs() {
+            if let Err(error) = crate::server::pane_input::apply_terminal_attach_scroll(
+                runtime,
+                crate::protocol::AttachScrollSource::Wheel,
+                direction,
+                1,
+                Some(params.column),
+                Some(params.row),
+                0,
+            ) {
+                return encode_error(id, "scroll_intent_failed", error);
+            }
+        }
+        encode_success(id, ResponseResult::Ok {})
     }
 
     pub(super) fn handle_pane_edit_scrollback(&mut self, id: String, target: PaneTarget) -> String {
@@ -2279,6 +2346,112 @@ mod tests {
         );
         app.state.insert_test_runtime(pane_id, runtime);
         (app, public_pane_id, pane_id)
+    }
+
+    fn scroll_intent(app: &App, pane_id: &str, lines: i16) -> PaneScrollIntentParams {
+        let (ws, pane) = app.parse_pane_id(pane_id).unwrap();
+        let info = app.pane_info(ws, pane).unwrap();
+        PaneScrollIntentParams {
+            pane_id: pane_id.into(),
+            terminal_id: info.terminal_id,
+            cols: 44,
+            rows: 46,
+            column: 21,
+            row: 32,
+            lines,
+            expires_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+                + 200,
+        }
+    }
+
+    #[tokio::test]
+    async fn scroll_intent_routes_each_row_using_live_modes_without_resizing_or_claiming() {
+        for (modes, expected) in [
+            (
+                b"\x1b[?1000h\x1b[?1006h".as_slice(),
+                b"\x1b[<64;22;33M".as_slice(),
+            ),
+            (b"\x1b[?1049h\x1b[?1007h".as_slice(), b"\x1b[A".as_slice()),
+        ] {
+            let (mut app, public) = app_with_test_workspace();
+            let pane = app.state.workspaces[0].tabs[0].root_pane;
+            let (runtime, mut rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    44, 46, 0, modes, 8,
+                );
+            runtime.resize(46, 44, 9, 17);
+            let pixels = runtime.pixel_size();
+            app.state.insert_test_runtime(pane, runtime);
+            let params = scroll_intent(&app, &public, -3);
+            let response: SuccessResponse =
+                serde_json::from_str(&app.handle_pane_scroll_intent("req".into(), params)).unwrap();
+            assert!(matches!(response.result, ResponseResult::Ok {}));
+            for _ in 0..3 {
+                assert_eq!(rx.try_recv().unwrap().as_ref(), expected);
+            }
+            assert!(rx.try_recv().is_err());
+            assert!(app.state.direct_attach_resize_locks.is_empty());
+            let runtime = app
+                .state
+                .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane)
+                .unwrap();
+            assert_eq!(runtime.current_size(), (46, 44));
+            assert_eq!(runtime.pixel_size(), pixels);
+        }
+    }
+
+    #[tokio::test]
+    async fn scroll_intent_rejects_stale_identity_geometry_deadline_and_invalid_distance() {
+        let (mut app, public, mut rx) = app_with_send_key_runtime(8);
+        for change in 0..7 {
+            let mut params = scroll_intent(&app, &public, -3);
+            params.cols = 80;
+            params.rows = 24;
+            params.row = 12;
+            match change {
+                0 => params.terminal_id = "other-terminal".into(),
+                1 => params.cols = 44,
+                2 => params.row = 24,
+                3 => params.column = 80,
+                4 => params.lines = 0,
+                5 => params.lines = i16::MIN,
+                _ => params.expires_at_ms = 0,
+            }
+            let response = app.handle_pane_scroll_intent("req".into(), params);
+            assert!(
+                serde_json::from_str::<ErrorResponse>(&response).is_ok(),
+                "{response}"
+            );
+            assert!(rx.try_recv().is_err());
+            assert!(app.state.direct_attach_resize_locks.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn scroll_intent_uses_real_host_history_and_returns_to_bottom() {
+        let (mut app, public, pane) = app_with_scrollback_runtime();
+        for (lines, expected) in [(-3, 3), (3, 0)] {
+            let mut params = scroll_intent(&app, &public, lines);
+            params.cols = 20;
+            params.rows = 5;
+            params.column = 4;
+            params.row = 2;
+            let response: SuccessResponse =
+                serde_json::from_str(&app.handle_pane_scroll_intent("req".into(), params)).unwrap();
+            assert!(matches!(response.result, ResponseResult::Ok {}));
+            let runtime = app
+                .state
+                .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane)
+                .unwrap();
+            assert_eq!(
+                runtime.scroll_metrics().unwrap().offset_from_bottom,
+                expected
+            );
+            assert_eq!(runtime.current_size(), (5, 20));
+        }
     }
 
     fn metadata_params(pane_id: String) -> PaneReportMetadataParams {

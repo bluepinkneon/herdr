@@ -116,7 +116,7 @@ test("retries an initial selection while Herdr detects the process", async () =>
   tui.select("session-a");
 
   await plugin.tui(tui.api);
-  await new Promise((resolve) => setTimeout(resolve, 125));
+  await waitForNextRequest();
 
   expect(requests.map((request) => requestParam(request, "agent_session_id"))).toEqual([
     "session-a",

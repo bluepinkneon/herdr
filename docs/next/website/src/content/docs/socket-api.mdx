@@ -175,6 +175,21 @@ pane.
 
 Clients can treat `offset_from_bottom == 0` as at-bottom state.
 
+### Ephemeral scroll intent (theBus fork 0.9.1)
+
+`pane.scroll_intent` accepts `pane_id`, `terminal_id`, `cols`, `rows`,
+zero-based `column`/`row`, signed `lines` (nonzero, at most 64), and
+`expires_at_ms`. The same-host bridge must issue a deadline within 250ms.
+The server rejects expired intent, unknown fields, stale terminal identity,
+geometry mismatch, and out-of-bounds cells before any effect.
+
+The method routes each measured row through the native wheel dispatcher using
+current PTY modes: mouse wheel, alternate-screen arrows, or host scrollback.
+It redraws existing observers but never acquires a controller, focus, resize
+lock, or geometry authority. It accepts no keys, raw bytes, or modifier flags.
+Clients serialize and bound pending intent, discard it on typing/target change
+or disconnect, and never retry an ambiguous dispatched request.
+
 ### Pane graphics
 
 Pane graphics let a plugin place image data over a pane. They are available by

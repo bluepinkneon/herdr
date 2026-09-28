@@ -8,6 +8,7 @@ mod panes;
 mod plugins;
 mod protocol;
 mod protocol_guard;
+mod scroll_intent;
 mod sessions;
 mod surface;
 mod workspace;

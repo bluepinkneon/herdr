@@ -248,6 +248,22 @@ pub struct PaneScrollParams {
     pub offset_from_bottom: u64,
 }
 
+/// Ephemeral wheel intent from a renderer; never claims terminal ownership.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaneScrollIntentParams {
+    pub pane_id: String,
+    pub terminal_id: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub column: u16,
+    pub row: u16,
+    /// Negative scrolls up, positive scrolls down; at most 64 rows per request.
+    pub lines: i16,
+    /// Same-host bridge deadline. Stale intent must not replay after a stall.
+    pub expires_at_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneTextPoint {
     pub row: u32,

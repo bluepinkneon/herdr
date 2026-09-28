@@ -3193,6 +3193,66 @@
           ],
           "type": "string"
         },
+        "PaneScrollIntentParams": {
+          "additionalProperties": false,
+          "description": "Ephemeral wheel intent from a renderer; never claims terminal ownership.",
+          "properties": {
+            "cols": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "column": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "expires_at_ms": {
+              "description": "Same-host bridge deadline. Stale intent must not replay after a stall.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "lines": {
+              "description": "Negative scrolls up, positive scrolls down; at most 64 rows per request.",
+              "format": "int16",
+              "maximum": 32767,
+              "minimum": -32768,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "row": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "terminal_id",
+            "cols",
+            "rows",
+            "column",
+            "row",
+            "lines",
+            "expires_at_ms"
+          ],
+          "type": "object"
+        },
         "PaneScrollParams": {
           "properties": {
             "offset_from_bottom": {
@@ -5699,6 +5759,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneScrollParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.scroll_intent",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneScrollIntentParams"
             }
           },
           "required": [
