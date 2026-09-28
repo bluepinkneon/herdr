@@ -362,33 +362,50 @@ fn should_prefer_osc52() -> bool {
 const DUPLICATE_CLIPBOARD_WRITE_WINDOW: std::time::Duration =
     std::time::Duration::from_millis(1000);
 
-type ClipboardWriteDedup = std::sync::Mutex<Option<(Vec<u8>, std::time::Instant)>>;
+/// A previous accepted clipboard write and when it was accepted.
+type ClipboardWriteDedup = Option<(Vec<u8>, std::time::Instant)>;
 
-fn last_clipboard_write() -> &'static ClipboardWriteDedup {
-    static LAST: std::sync::OnceLock<ClipboardWriteDedup> = std::sync::OnceLock::new();
+fn last_clipboard_write() -> &'static std::sync::Mutex<ClipboardWriteDedup> {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<ClipboardWriteDedup>> =
+        std::sync::OnceLock::new();
     LAST.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-/// Whether this payload is an immediate repeat of the last clipboard write.
+/// Whether `bytes` repeats the last accepted clipboard payload within the window.
 ///
-/// Records the payload when it is accepted so a burst of identical writes
-/// collapses to one without extending the window indefinitely.
-fn is_duplicate_clipboard_write(bytes: &[u8], now: std::time::Instant) -> bool {
-    let mut last = match last_clipboard_write().lock() {
-        Ok(last) => last,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    match last.as_mut() {
+/// Records `bytes` as the new anchor when it is accepted. A suppressed repeat
+/// leaves the anchor unchanged, so an identical payload is accepted again once
+/// the window has elapsed instead of a steady stream of repeats suppressing it
+/// indefinitely.
+fn clipboard_write_is_duplicate(
+    last: &mut ClipboardWriteDedup,
+    bytes: &[u8],
+    now: std::time::Instant,
+) -> bool {
+    match last {
         Some((previous, at))
             if previous == bytes && now.duration_since(*at) <= DUPLICATE_CLIPBOARD_WRITE_WINDOW =>
         {
-            *at = now;
             true
         }
         _ => {
             *last = Some((bytes.to_vec(), now));
             false
         }
+    }
+}
+
+/// Forget `bytes` after a failed write so an identical retry is not dropped.
+fn forget_failed_clipboard_write(bytes: &[u8], at: std::time::Instant) {
+    let mut last = match last_clipboard_write().lock() {
+        Ok(last) => last,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if last
+        .as_ref()
+        .is_some_and(|(previous, recorded)| previous == bytes && *recorded == at)
+    {
+        *last = None;
     }
 }
 
@@ -408,18 +425,31 @@ pub(crate) fn reset_clipboard_write_dedup() {
 /// emits BEL here even though ST works in newer emulators.
 ///
 /// Returns false when the write was suppressed as an immediate duplicate of the
-/// previous payload.
+/// previous accepted payload.
 pub fn write_osc52_bytes(bytes: &[u8]) -> bool {
-    if is_duplicate_clipboard_write(bytes, std::time::Instant::now()) {
+    let now = std::time::Instant::now();
+    let duplicate = {
+        let mut last = match last_clipboard_write().lock() {
+            Ok(last) => last,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        clipboard_write_is_duplicate(&mut last, bytes, now)
+    };
+    if duplicate {
         return false;
     }
-    if !should_prefer_osc52() && crate::platform::write_clipboard(bytes) {
-        return true;
-    }
 
-    let sequence = osc52_sequence(bytes);
-    let _ = std::io::stdout().write_all(sequence.as_bytes());
-    let _ = std::io::stdout().flush();
+    let delivered = if !should_prefer_osc52() && crate::platform::write_clipboard(bytes) {
+        true
+    } else {
+        let sequence = osc52_sequence(bytes);
+        let wrote = std::io::stdout().write_all(sequence.as_bytes()).is_ok();
+        let _ = std::io::stdout().flush();
+        wrote
+    };
+    if !delivered {
+        forget_failed_clipboard_write(bytes, now);
+    }
     true
 }
 
@@ -475,28 +505,32 @@ mod tests {
 
     #[test]
     fn identical_clipboard_writes_within_window_are_deduplicated() {
-        reset_clipboard_write_dedup();
+        let mut last = None;
         let base = std::time::Instant::now();
-        assert!(!is_duplicate_clipboard_write(b"hello", base));
+        assert!(!clipboard_write_is_duplicate(&mut last, b"hello", base));
         // A second identical write from the same copy action must be dropped.
-        assert!(is_duplicate_clipboard_write(
+        assert!(clipboard_write_is_duplicate(
+            &mut last,
             b"hello",
             base + std::time::Duration::from_millis(10)
         ));
-        // A burst keeps collapsing even as each repeat refreshes the window.
-        assert!(is_duplicate_clipboard_write(
+        // A suppressed repeat does not extend the window: the payload is
+        // accepted again once the window from the accepted write elapses.
+        assert!(!clipboard_write_is_duplicate(
+            &mut last,
             b"hello",
-            base + std::time::Duration::from_millis(20)
+            base + DUPLICATE_CLIPBOARD_WRITE_WINDOW + std::time::Duration::from_millis(1)
         ));
     }
 
     #[test]
     fn different_or_late_clipboard_writes_are_kept() {
-        reset_clipboard_write_dedup();
+        let mut last = None;
         let base = std::time::Instant::now();
-        assert!(!is_duplicate_clipboard_write(b"first", base));
-        assert!(!is_duplicate_clipboard_write(b"second", base));
-        assert!(!is_duplicate_clipboard_write(
+        assert!(!clipboard_write_is_duplicate(&mut last, b"first", base));
+        assert!(!clipboard_write_is_duplicate(&mut last, b"second", base));
+        assert!(!clipboard_write_is_duplicate(
+            &mut last,
             b"second",
             base + DUPLICATE_CLIPBOARD_WRITE_WINDOW + std::time::Duration::from_millis(1)
         ));
