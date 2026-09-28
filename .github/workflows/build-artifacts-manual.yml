@@ -109,10 +109,11 @@ jobs:
             exit 1
           fi
           if [ '${{ matrix.target }}' = aarch64-unknown-linux-musl ]; then
-            qemu-aarch64 ./${{ matrix.name }} --version | tee -a BUILD_INFO.txt
+            version_output="$(qemu-aarch64 ./${{ matrix.name }} --version)"
           else
-            ./${{ matrix.name }} --version | tee -a BUILD_INFO.txt
+            version_output="$(./${{ matrix.name }} --version)"
           fi
+          printf '%s\n' "$version_output" >> BUILD_INFO.txt
           {
             echo "commit=$GITHUB_SHA"
             echo "target=${{ matrix.target }}"
@@ -174,7 +175,8 @@ jobs:
         run: |
           cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
           file ${{ matrix.name }} > BUILD_INFO.txt
-          ./${{ matrix.name }} --version | tee -a BUILD_INFO.txt
+          version_output="$(./${{ matrix.name }} --version)"
+          printf '%s\n' "$version_output" >> BUILD_INFO.txt
           {
             echo "commit=$GITHUB_SHA"
             echo "target=${{ matrix.target }}"
