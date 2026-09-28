@@ -443,9 +443,8 @@ pub fn write_osc52_bytes(bytes: &[u8]) -> bool {
         true
     } else {
         let sequence = osc52_sequence(bytes);
-        let wrote = std::io::stdout().write_all(sequence.as_bytes()).is_ok();
-        let _ = std::io::stdout().flush();
-        wrote
+        let mut stdout = std::io::stdout();
+        stdout.write_all(sequence.as_bytes()).is_ok() && stdout.flush().is_ok()
     };
     if !delivered {
         forget_failed_clipboard_write(bytes, now);
